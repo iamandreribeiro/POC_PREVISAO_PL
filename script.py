@@ -28,6 +28,7 @@ def load_and_prep_data(filepath):
         print("ERRO: Arquivo não encontrado.")
         return pd.DataFrame()
 
+    # 1. Garantir que todas as FEATURES existam
     for col in FEATURES:
         if col not in df.columns:
             df[col] = 0
@@ -39,6 +40,7 @@ def load_and_prep_data(filepath):
 
     df = df.sort_values(by=['team_name', 'season'])
 
+    # 2. Criar Features de Lag (T-1)
     print("Criando features de Lag (T-1)...")
     lag_cols = []
     for col in FEATURES:
@@ -46,8 +48,10 @@ def load_and_prep_data(filepath):
         df[lag_col] = df.groupby('team_name')[col].shift(1)
         lag_cols.append(lag_col)
 
+    # Filtrar dados (2020 em diante)
     df_model = df[df['season'] >= 2020].copy()
     
+    # Preencher Lags vazios para times promovidos
     seasons = sorted(df_model['season'].unique())
     df_filled_list = []
 
@@ -76,6 +80,7 @@ def load_and_prep_data(filepath):
     return df_final
 
 def get_zone_label(rank):
+    """Define a zona baseada na posição."""
     if rank <= 4: return "UCL"
     if rank == 5: return "UEL"
     if 6 <= rank <= 7: return "UECL"
@@ -86,6 +91,7 @@ def plot_results(results_df):
     print("\nGerando gráficos...")
     sns.set_theme(style="whitegrid")
     
+    # 1. Comparação de Pontos
     plt.figure(figsize=(14, 7))
     x = range(len(results_df))
     width = 0.35
@@ -102,6 +108,7 @@ def plot_results(results_df):
     plt.savefig('comparacao_pontos.png')
     print("-> Gráfico salvo: comparacao_pontos.png")
 
+    # 2. Scatter Plot
     plt.figure(figsize=(10, 10))
     sns.scatterplot(data=results_df, x='points', y='predicted_points', s=100, hue='team_name', legend=False)
     
@@ -122,6 +129,7 @@ def plot_results(results_df):
     plt.savefig('scatter_pontos.png')
     print("-> Gráfico salvo: scatter_pontos.png")
 
+    # 3. Erro Residual
     results_df['error'] = results_df['predicted_points'] - results_df['points']
     plt.figure(figsize=(14, 7))
     colors = ['#2ca02c' if x > 0 else '#d62728' for x in results_df['error']]
@@ -133,6 +141,38 @@ def plot_results(results_df):
     plt.tight_layout()
     plt.savefig('erro_residual.png')
     print("-> Gráfico salvo: erro_residual.png")
+
+def calculate_baseline_metrics(df):
+    df_2024 = df[df['season'] == 2024].copy()
+    
+    if df_2024.empty:
+        print("Aviso: Sem dados de 2024 para calcular o baseline.")
+        return
+
+    df_2024['baseline_points'] = df_2024['points_T-1']
+    df_2024 = df_2024.sort_values(by='baseline_points', ascending=False)
+    df_2024['baseline_predicted_rank'] = range(1, len(df_2024) + 1)
+    
+    real_ranking = df_2024[['team_name', 'points']].sort_values(by='points', ascending=False)
+    real_ranking['actual_rank'] = range(1, len(real_ranking) + 1)
+    
+    results = df_2024.merge(real_ranking[['team_name', 'actual_rank']], on='team_name')
+
+    rmse_base = np.sqrt(mean_squared_error(results['points'], results['baseline_points']))
+    
+    accM_base = (abs(results['baseline_predicted_rank'] - results['actual_rank']) <= 2).mean()
+    
+    results['actual_zone'] = results['actual_rank'].apply(get_zone_label)
+    results['baseline_zone'] = results['baseline_predicted_rank'].apply(get_zone_label)
+    accQ_base = (results['baseline_zone'] == results['actual_zone']).mean()
+    
+    print("\n" + "="*40)
+    print("      METRICAS DO BASELINE (ANO ANTERIOR)")
+    print("="*40)
+    print(f"RMSE Baseline: {rmse_base:.2f}")
+    print(f"AccM Baseline: {accM_base*100:.1f}%")
+    print(f"AccQ Baseline: {accQ_base*100:.1f}%")
+    print("="*40)
 
 def train_and_optimize(df):
     train_mask = (df['season'] >= 2020) & (df['season'] < 2024)
@@ -157,7 +197,7 @@ def train_and_optimize(df):
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    print("\nOtimizando modelo...")
+    print("\nOtimizando modelo XGBoost...")
     xgb_model = xgb.XGBRegressor(random_state=42, objective='reg:squarederror')
     param_grid = {
         'n_estimators': [50, 100],
@@ -172,6 +212,7 @@ def train_and_optimize(df):
     print(f"Melhores parâmetros: {grid.best_params_}")
 
     df_test['predicted_points'] = best_model.predict(X_test_scaled)
+
     df_test = df_test.sort_values(by='predicted_points', ascending=False)
     df_test['predicted_rank'] = range(1, len(df_test) + 1)
     
@@ -179,6 +220,7 @@ def train_and_optimize(df):
     real_ranking['actual_rank'] = range(1, len(real_ranking) + 1)
     
     results = df_test.merge(real_ranking[['team_name', 'actual_rank']], on='team_name')
+    
     results['actual_zone'] = results['actual_rank'].apply(get_zone_label)
     results['predicted_zone'] = results['predicted_rank'].apply(get_zone_label)
 
@@ -189,7 +231,7 @@ def train_and_optimize(df):
     mae_rank = mean_absolute_error(results['actual_rank'], results['predicted_rank'])
 
     print("\n" + "="*60)
-    print("               RELATÓRIO FINAL E MÉTRICAS")
+    print("               RELATÓRIO FINAL (MODELO PROPOSTO)")
     print("="*60)
     print(f"RMSE (Erro de Pontos): {rmse:.2f}")
     print(f"MAE (Erro Médio de Posição): {mae_rank:.2f}")
@@ -209,8 +251,11 @@ def train_and_optimize(df):
 if __name__ == "__main__":
     df_processed = load_and_prep_data(FILE_PATH)
     if not df_processed.empty:
-        results = train_and_optimize(df_processed)
-        if not results.empty:
-            plot_results(results)
+        results_model = train_and_optimize(df_processed)
+        
+        if not results_model.empty:
+            plot_results(results_model)
+            
+        calculate_baseline_metrics(df_processed)
     else:
-        print("Não foi possível gerar o modelo.")
+        print("Não foi possível processar os dados.")
